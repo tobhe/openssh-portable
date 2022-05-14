@@ -236,8 +236,7 @@ int	sshbuf_put_bignum2(struct sshbuf *buf, const BIGNUM *v);
 # ifdef OPENSSL_HAS_ECC
 int	sshbuf_get_ec(struct sshbuf *buf, EC_POINT *v, const EC_GROUP *g);
 int	sshbuf_get_eckey(struct sshbuf *buf, EC_KEY *v);
-int	sshbuf_put_ec(struct sshbuf *buf, const EC_POINT *v, const EC_GROUP *g);
-int	sshbuf_put_eckey(struct sshbuf *buf, const EC_KEY *v);
+int	sshbuf_put_eckey(struct sshbuf *buf, EVP_PKEY *v);
 # endif /* OPENSSL_HAS_ECC */
 #endif /* WITH_OPENSSL */
 

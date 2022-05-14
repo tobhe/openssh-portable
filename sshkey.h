@@ -125,13 +125,9 @@ struct sshkey_cert {
 struct sshkey {
 	int	 type;
 	int	 flags;
-	/* KEY_RSA */
-	RSA	*rsa;
-	/* KEY_DSA */
-	DSA	*dsa;
-	/* KEY_ECDSA and KEY_ECDSA_SK */
+	/* KEY_ECDSA, KEY_ECDSA_SK, KEY_RSA and KEY_DSA */
+	EVP_PKEY	*key;
 	int	 ecdsa_nid;	/* NID of curve */
-	EC_KEY	*ecdsa;
 	/* KEY_ED25519 and KEY_ED25519_SK */
 	u_char	*ed25519_sk;
 	u_char	*ed25519_pk;
@@ -223,7 +219,7 @@ int		 sshkey_curve_name_to_nid(const char *);
 const char *	 sshkey_curve_nid_to_name(int);
 u_int		 sshkey_curve_nid_to_bits(int);
 int		 sshkey_ecdsa_bits_to_nid(int);
-int		 sshkey_ecdsa_key_to_nid(EC_KEY *);
+int		 sshkey_ecdsa_key_to_nid(EVP_PKEY *);
 int		 sshkey_ec_nid_to_hash_alg(int nid);
 int		 sshkey_ec_validate_public(const EC_GROUP *, const EC_POINT *);
 int		 sshkey_ec_validate_private(const EC_KEY *);
@@ -274,7 +270,8 @@ int	sshkey_parse_pubkey_from_private_fileblob_type(struct sshbuf *blob,
     int type, struct sshkey **pubkeyp);
 
 /* XXX should be internal, but used by ssh-keygen */
-int ssh_rsa_complete_crt_parameters(struct sshkey *, const BIGNUM *);
+int ssh_rsa_complete_crt_parameters(const BIGNUM *, const BIGNUM *,
+    const BIGNUM *, const BIGNUM *, BIGNUM **, BIGNUM **);
 
 /* stateful keys (e.g. XMSS) */
 int	 sshkey_set_filename(struct sshkey *, const char *);

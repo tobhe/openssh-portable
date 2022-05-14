@@ -19,8 +19,12 @@
 #include <sys/stat.h>
 
 #ifdef WITH_OPENSSL
+#include <openssl/decoder.h>
+#include <openssl/encoder.h>
 #include <openssl/evp.h>
+#include <openssl/param_build.h>
 #include <openssl/pem.h>
+#include <openssl/core_names.h>
 #include "openbsd-compat/openssl-compat.h"
 #endif
 
@@ -374,48 +378,52 @@ do_convert_to_ssh2(struct passwd *pw, struct sshkey *k)
 static void
 do_convert_to_pkcs8(struct sshkey *k)
 {
+	OSSL_ENCODER_CTX *ectx = NULL;
+
 	switch (sshkey_type_plain(k->type)) {
-	case KEY_RSA:
-		if (!PEM_write_RSA_PUBKEY(stdout, k->rsa))
-			fatal("PEM_write_RSA_PUBKEY failed");
-		break;
-	case KEY_DSA:
-		if (!PEM_write_DSA_PUBKEY(stdout, k->dsa))
-			fatal("PEM_write_DSA_PUBKEY failed");
-		break;
 #ifdef OPENSSL_HAS_ECC
 	case KEY_ECDSA:
-		if (!PEM_write_EC_PUBKEY(stdout, k->ecdsa))
-			fatal("PEM_write_EC_PUBKEY failed");
-		break;
 #endif
+	case KEY_RSA:
+	case KEY_DSA:
+		ectx = OSSL_ENCODER_CTX_new_for_pkey(k->key,
+		    OSSL_KEYMGMT_SELECT_PUBLIC_KEY | OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS,
+		    "PEM", "pkcs8", NULL);
+		if (ectx == NULL)
+		    fatal("OSSL_ENCODER_CTX_new_for_pkey() failed");
+		if (OSSL_ENCODER_to_fp(ectx, stdout) != 1)
+			fatal("OSSL_ENCODER_to_fp() failed");
+		break;
 	default:
 		fatal_f("unsupported key type %s", sshkey_type(k));
 	}
+	OSSL_ENCODER_CTX_free(ectx);
 	exit(0);
 }
 
 static void
 do_convert_to_pem(struct sshkey *k)
 {
+	OSSL_ENCODER_CTX *ectx = NULL;
+
 	switch (sshkey_type_plain(k->type)) {
-	case KEY_RSA:
-		if (!PEM_write_RSAPublicKey(stdout, k->rsa))
-			fatal("PEM_write_RSAPublicKey failed");
-		break;
-	case KEY_DSA:
-		if (!PEM_write_DSA_PUBKEY(stdout, k->dsa))
-			fatal("PEM_write_DSA_PUBKEY failed");
-		break;
 #ifdef OPENSSL_HAS_ECC
 	case KEY_ECDSA:
-		if (!PEM_write_EC_PUBKEY(stdout, k->ecdsa))
-			fatal("PEM_write_EC_PUBKEY failed");
-		break;
 #endif
+	case KEY_RSA:
+	case KEY_DSA:
+		ectx = OSSL_ENCODER_CTX_new_for_pkey(k->key,
+		    OSSL_KEYMGMT_SELECT_PUBLIC_KEY | OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS,
+		    "PEM", "PrivateKeyInfo", NULL);
+		if (ectx == NULL)
+			fatal("OSSL_ENCODER_CTX_new_for_pkey() failed");
+		if (OSSL_ENCODER_to_fp(ectx, stdout) != 1)
+			fatal("OSSL_ENCODER_to_fp() failed");
+		break;
 	default:
 		fatal_f("unsupported key type %s", sshkey_type(k));
 	}
+	OSSL_ENCODER_CTX_free(ectx);
 	exit(0);
 }
 
@@ -480,10 +488,14 @@ do_convert_private_ssh2(struct sshbuf *b)
 	u_int magic, i1, i2, i3, i4;
 	size_t slen;
 	u_long e;
-	BIGNUM *dsa_p = NULL, *dsa_q = NULL, *dsa_g = NULL;
+	EVP_PKEY_CTX *ctx = NULL;
+	OSSL_PARAM *params;
+	OSSL_PARAM_BLD *tmpl;
+	BIGNUM *rsa_n = NULL, *rsa_d = NULL, *rsa_e = NULL;
+	BIGNUM *rsa_iqmp = NULL, *rsa_p = NULL, *rsa_q = NULL;
+	BIGNUM *rsa_dmp1 = NULL, *rsa_dmq1 = NULL;
+	BIGNUM *dsa_p = NULL, *dsa_g = NULL, *dsa_q = NULL;
 	BIGNUM *dsa_pub_key = NULL, *dsa_priv_key = NULL;
-	BIGNUM *rsa_n = NULL, *rsa_e = NULL, *rsa_d = NULL;
-	BIGNUM *rsa_p = NULL, *rsa_q = NULL, *rsa_iqmp = NULL;
 
 	if ((r = sshbuf_get_u32(b, &magic)) != 0)
 		fatal_fr(r, "parse magic");
@@ -534,12 +546,29 @@ do_convert_private_ssh2(struct sshbuf *b)
 		buffer_get_bignum_bits(b, dsa_q);
 		buffer_get_bignum_bits(b, dsa_pub_key);
 		buffer_get_bignum_bits(b, dsa_priv_key);
-		if (!DSA_set0_pqg(key->dsa, dsa_p, dsa_q, dsa_g))
-			fatal_f("DSA_set0_pqg failed");
-		dsa_p = dsa_q = dsa_g = NULL; /* transferred */
-		if (!DSA_set0_key(key->dsa, dsa_pub_key, dsa_priv_key))
-			fatal_f("DSA_set0_key failed");
-		dsa_pub_key = dsa_priv_key = NULL; /* transferred */
+		if ((tmpl = OSSL_PARAM_BLD_new()) == NULL ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_FFC_P, dsa_p) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_FFC_G, dsa_g) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_FFC_Q, dsa_q) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_PUB_KEY, dsa_pub_key) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_PRIV_KEY, dsa_priv_key) != 1 ||
+		    (params = OSSL_PARAM_BLD_to_param(tmpl)) == NULL)
+			fatal_f("OSSL_PARAM_BLD_to_param failed");
+		OSSL_PARAM_BLD_free(tmpl);
+
+		if ((ctx = EVP_PKEY_CTX_new_from_name(NULL, "DSA", NULL)) == NULL ||
+		    EVP_PKEY_fromdata_init(ctx) != 1 ||
+		    EVP_PKEY_fromdata(ctx, &key->key, EVP_PKEY_KEYPAIR |
+		    EVP_PKEY_KEY_PARAMETERS, params) != 1)
+			fatal_f("EVP_PKEY_fromdata failed");
+
+		EVP_PKEY_CTX_free(ctx);
+		OSSL_PARAM_free(params);
+		BN_free(dsa_p);
+		BN_free(dsa_g);
+		BN_free(dsa_q);
+		BN_free(dsa_pub_key);
+		BN_clear_free(dsa_priv_key);
 		break;
 	case KEY_RSA:
 		if ((r = sshbuf_get_u8(b, &e1)) != 0 ||
@@ -574,15 +603,40 @@ do_convert_private_ssh2(struct sshbuf *b)
 		buffer_get_bignum_bits(b, rsa_iqmp);
 		buffer_get_bignum_bits(b, rsa_q);
 		buffer_get_bignum_bits(b, rsa_p);
-		if (!RSA_set0_key(key->rsa, rsa_n, rsa_e, rsa_d))
-			fatal_f("RSA_set0_key failed");
-		rsa_n = rsa_e = rsa_d = NULL; /* transferred */
-		if (!RSA_set0_factors(key->rsa, rsa_p, rsa_q))
-			fatal_f("RSA_set0_factors failed");
-		rsa_p = rsa_q = NULL; /* transferred */
-		if ((r = ssh_rsa_complete_crt_parameters(key, rsa_iqmp)) != 0)
+
+		if ((r = ssh_rsa_complete_crt_parameters(rsa_d, rsa_iqmp, rsa_p, rsa_q,
+		    &rsa_dmp1, &rsa_dmq1)) != 0)
 			fatal_fr(r, "generate RSA parameters");
+
+		if ((tmpl = OSSL_PARAM_BLD_new()) == NULL ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_RSA_N, rsa_n) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_RSA_E, rsa_e) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_RSA_D, rsa_d) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_RSA_FACTOR1, rsa_p) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_RSA_FACTOR2, rsa_q) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_RSA_COEFFICIENT1, rsa_iqmp) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_RSA_EXPONENT1, rsa_dmp1) != 1 ||
+		    OSSL_PARAM_BLD_push_BN(tmpl, OSSL_PKEY_PARAM_RSA_EXPONENT2, rsa_dmq1) != 1 ||
+		    (params = OSSL_PARAM_BLD_to_param(tmpl)) == NULL)
+			fatal_f("OSSL_PARAM_BLD_to_param failed");
+		OSSL_PARAM_BLD_free(tmpl);
+
+		if ((ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL)) == NULL ||
+		    EVP_PKEY_fromdata_init(ctx) != 1 ||
+		    EVP_PKEY_fromdata(ctx, &key->key, EVP_PKEY_KEYPAIR |
+		    EVP_PKEY_KEY_PARAMETERS, params) != 1)
+			fatal_f("EVP_PKEY_fromdata failed");
+
+		EVP_PKEY_CTX_free(ctx);
+		OSSL_PARAM_free(params);
+		BN_free(rsa_n);
+		BN_free(rsa_e);
+		BN_free(rsa_d);
+		BN_free(rsa_p);
+		BN_free(rsa_q);
 		BN_clear_free(rsa_iqmp);
+		BN_clear_free(rsa_dmq1);
+		BN_clear_free(rsa_dmp1);
 		break;
 	}
 	rlen = sshbuf_len(b);
@@ -693,49 +747,50 @@ do_convert_from_pkcs8(struct sshkey **k, int *private)
 		    identity_file);
 	}
 	fclose(fp);
+	if ((*k = sshkey_new(KEY_UNSPEC)) == NULL)
+		fatal("sshkey_new failed");
+	(*k)->key = pubkey;
 	switch (EVP_PKEY_base_id(pubkey)) {
 	case EVP_PKEY_RSA:
-		if ((*k = sshkey_new(KEY_UNSPEC)) == NULL)
-			fatal("sshkey_new failed");
 		(*k)->type = KEY_RSA;
-		(*k)->rsa = EVP_PKEY_get1_RSA(pubkey);
 		break;
 	case EVP_PKEY_DSA:
-		if ((*k = sshkey_new(KEY_UNSPEC)) == NULL)
-			fatal("sshkey_new failed");
 		(*k)->type = KEY_DSA;
-		(*k)->dsa = EVP_PKEY_get1_DSA(pubkey);
 		break;
 #ifdef OPENSSL_HAS_ECC
 	case EVP_PKEY_EC:
-		if ((*k = sshkey_new(KEY_UNSPEC)) == NULL)
-			fatal("sshkey_new failed");
 		(*k)->type = KEY_ECDSA;
-		(*k)->ecdsa = EVP_PKEY_get1_EC_KEY(pubkey);
-		(*k)->ecdsa_nid = sshkey_ecdsa_key_to_nid((*k)->ecdsa);
+		(*k)->ecdsa_nid = sshkey_ecdsa_key_to_nid((*k)->key);
 		break;
 #endif
 	default:
 		fatal_f("unsupported pubkey type %d",
 		    EVP_PKEY_base_id(pubkey));
+		EVP_PKEY_free(pubkey);
 	}
-	EVP_PKEY_free(pubkey);
 	return;
 }
 
 static void
 do_convert_from_pem(struct sshkey **k, int *private)
 {
+	OSSL_DECODER_CTX *dctx;
+	EVP_PKEY *key;
 	FILE *fp;
-	RSA *rsa;
+
+	dctx = OSSL_DECODER_CTX_new_for_pkey(&key, "PEM", NULL, "RSA",
+	    OSSL_KEYMGMT_SELECT_PUBLIC_KEY, NULL, NULL);
+	if (dctx == NULL)
+		fatal("OSSL_DECODER_CTX_new_for_pkey() failed");
 
 	if ((fp = fopen(identity_file, "r")) == NULL)
 		fatal("%s: %s: %s", __progname, identity_file, strerror(errno));
-	if ((rsa = PEM_read_RSAPublicKey(fp, NULL, NULL, NULL)) != NULL) {
+	if (OSSL_DECODER_from_fp(dctx, fp) == 1) {
+		OSSL_DECODER_CTX_free(dctx);
 		if ((*k = sshkey_new(KEY_UNSPEC)) == NULL)
 			fatal("sshkey_new failed");
 		(*k)->type = KEY_RSA;
-		(*k)->rsa = rsa;
+		(*k)->key = key;
 		fclose(fp);
 		return;
 	}
@@ -746,6 +801,7 @@ static void
 do_convert_from(struct passwd *pw)
 {
 	struct sshkey *k = NULL;
+	OSSL_ENCODER_CTX *ectx;
 	int r, private = 0, ok = 0;
 	struct stat st;
 
@@ -775,19 +831,19 @@ do_convert_from(struct passwd *pw)
 			fprintf(stdout, "\n");
 	} else {
 		switch (k->type) {
-		case KEY_DSA:
-			ok = PEM_write_DSAPrivateKey(stdout, k->dsa, NULL,
-			    NULL, 0, NULL, NULL);
-			break;
 #ifdef OPENSSL_HAS_ECC
 		case KEY_ECDSA:
-			ok = PEM_write_ECPrivateKey(stdout, k->ecdsa, NULL,
-			    NULL, 0, NULL, NULL);
-			break;
 #endif
 		case KEY_RSA:
-			ok = PEM_write_RSAPrivateKey(stdout, k->rsa, NULL,
-			    NULL, 0, NULL, NULL);
+		case KEY_DSA:
+			ectx = OSSL_ENCODER_CTX_new_for_pkey(k->key,
+			    OSSL_KEYMGMT_SELECT_KEYPAIR |
+			    OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS,
+			    "PEM", NULL, NULL);
+			if (ectx == NULL)
+			    fatal("OSSL_ENCODER_CTX_new_for_pkey() failed");
+			ok = OSSL_ENCODER_to_fp(ectx, stdout);
+			OSSL_ENCODER_CTX_free(ectx);
 			break;
 		default:
 			fatal_f("unsupported key type %s", sshkey_type(k));

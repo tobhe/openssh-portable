@@ -30,8 +30,10 @@
 #include <stdio.h>
 
 #if defined(WITH_OPENSSL) && defined(OPENSSL_HAS_ECC)
+#include <openssl/core_names.h>
+#include <openssl/evp.h>
 #include <openssl/objects.h>
-#include <openssl/ec.h>
+#include <openssl/param_build.h>
 #endif /* WITH_OPENSSL && OPENSSL_HAS_ECC */
 
 #include "log.h"
@@ -203,8 +205,9 @@ static int
 sshsk_ecdsa_assemble(struct sk_enroll_response *resp, struct sshkey **keyp)
 {
 	struct sshkey *key = NULL;
-	struct sshbuf *b = NULL;
-	EC_POINT *q = NULL;
+	EVP_PKEY_CTX *ctx = NULL;
+	OSSL_PARAM *params = NULL;
+	OSSL_PARAM_BLD *tmpl = NULL;
 	int r;
 
 	*keyp = NULL;
@@ -214,42 +217,33 @@ sshsk_ecdsa_assemble(struct sk_enroll_response *resp, struct sshkey **keyp)
 		goto out;
 	}
 	key->ecdsa_nid = NID_X9_62_prime256v1;
-	if ((key->ecdsa = EC_KEY_new_by_curve_name(key->ecdsa_nid)) == NULL ||
-	    (q = EC_POINT_new(EC_KEY_get0_group(key->ecdsa))) == NULL ||
-	    (b = sshbuf_new()) == NULL) {
-		error_f("allocation failed");
-		r = SSH_ERR_ALLOC_FAIL;
+
+	if ((tmpl = OSSL_PARAM_BLD_new()) == NULL ||
+	    OSSL_PARAM_BLD_push_utf8_string(tmpl, OSSL_PKEY_PARAM_GROUP_NAME,
+	    OBJ_nid2sn(key->ecdsa_nid), 0) != 1 ||
+	    OSSL_PARAM_BLD_push_octet_string(tmpl,
+	    OSSL_PKEY_PARAM_PUB_KEY, resp->public_key,
+	    resp->public_key_len) != 1 ||
+	    (params = OSSL_PARAM_BLD_to_param(tmpl)) == NULL) {
+		r = SSH_ERR_LIBCRYPTO_ERROR;
 		goto out;
 	}
-	if ((r = sshbuf_put_string(b,
-	    resp->public_key, resp->public_key_len)) != 0) {
-		error_fr(r, "sshbuf_put_string");
+	if ((ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL)) == NULL ||
+	    EVP_PKEY_fromdata_init(ctx) != 1 ||
+	    EVP_PKEY_fromdata(ctx, &key->key, EVP_PKEY_PUBLIC_KEY, params) != 1) {
+		r = SSH_ERR_LIBCRYPTO_ERROR;
 		goto out;
 	}
-	if ((r = sshbuf_get_ec(b, q, EC_KEY_get0_group(key->ecdsa))) != 0) {
-		error_fr(r, "parse");
-		r = SSH_ERR_INVALID_FORMAT;
-		goto out;
-	}
-	if (sshkey_ec_validate_public(EC_KEY_get0_group(key->ecdsa), q) != 0) {
-		error("Authenticator returned invalid ECDSA key");
-		r = SSH_ERR_KEY_INVALID_EC_VALUE;
-		goto out;
-	}
-	if (EC_KEY_set_public_key(key->ecdsa, q) != 1) {
-		/* XXX assume it is a allocation error */
-		error_f("allocation failed");
-		r = SSH_ERR_ALLOC_FAIL;
-		goto out;
-	}
+
 	/* success */
 	*keyp = key;
 	key = NULL; /* transferred */
 	r = 0;
  out:
-	EC_POINT_free(q);
+	EVP_PKEY_CTX_free(ctx);
+	OSSL_PARAM_BLD_free(tmpl);
+	OSSL_PARAM_free(params);
 	sshkey_free(key);
-	sshbuf_free(b);
 	return r;
 }
 #endif /* WITH_OPENSSL */

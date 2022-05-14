@@ -158,7 +158,6 @@ struct kex {
 	sig_atomic_t done;
 	u_int	flags;
 	int	hash_alg;
-	int	ec_nid;
 	char	*failed_choice;
 	int	(*verify_host_key)(struct sshkey *, struct ssh *);
 	struct sshkey *(*load_host_public_key)(int, int, struct ssh *);
@@ -170,8 +169,8 @@ struct kex {
 	/* kex specific state */
 	DH	*dh;			/* DH */
 	u_int	min, max, nbits;	/* GEX */
-	EC_KEY	*ec_client_key;		/* ECDH */
-	const EC_GROUP *ec_group;	/* ECDH */
+	EVP_PKEY	*ec_client_key;		/* ECDH */
+	int	ec_nid;			/* ECDH */
 	u_char c25519_client_key[CURVE25519_SIZE]; /* 25519 + KEM */
 	u_char c25519_client_pubkey[CURVE25519_SIZE]; /* 25519 */
 	u_char sntrup761_client_key[crypto_kem_sntrup761_SECRETKEYBYTES]; /* KEM */

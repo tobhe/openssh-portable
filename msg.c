@@ -71,7 +71,7 @@ ssh_msg_recv(int fd, struct sshbuf *m)
 
 	debug3("ssh_msg_recv entering");
 
-	if (atomicio(read, fd, buf, sizeof(buf)) != sizeof(buf)) {
+	if ((r = atomicio(read, fd, buf, sizeof(buf))) != sizeof(buf)) {
 		if (errno != EPIPE)
 			error_f("read header: %s", strerror(errno));
 		return (-1);
